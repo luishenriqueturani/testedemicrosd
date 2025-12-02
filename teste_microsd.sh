@@ -63,7 +63,8 @@ while true; do
     
     # Tentativa de cópia
     if cp "$DUMMY_FILE_PATH" "$TARGET_COPY_NAME"; then
-        echo "✅ Cópia $COPY_COUNT bem-sucedida. ($((COPY_COUNT * 4.2)) GB escritos)"
+        WRITTEN_GB=$(echo "scale=1; $COPY_COUNT * 4.2" | bc)
+        echo "✅ Cópia $COPY_COUNT bem-sucedida. ($WRITTEN_GB GB escritos)"
         
         # Opcional: Remova a cópia anterior para evitar que o espaço seja usado
         # A remoção permite que o teste continue a escrever no mesmo espaço físico, 
@@ -80,7 +81,10 @@ while true; do
         echo "Última cópia bem-sucedida: #$((COPY_COUNT - 1))"
         # O valor real é o valor da última cópia bem-sucedida,
         # mais o tamanho do arquivo de bloco (que falhou ao ser copiado por último).
-        REAL_CAPACITY_GB=$(awk "BEGIN {print (($COPY_COUNT - 1) * 4.2) + 4.2}")
+        # Calcular o tamanho das cópias bem-sucedidas (última bem-sucedida)
+        LAST_SUCCESS_GB=$(echo "scale=1; ($((COPY_COUNT - 1)) * 4.2)" | bc)
+        # Adiciona o tamanho do bloco que falhou (4.2 GB) para estimar a capacidade real
+        REAL_CAPACITY_GB=$(echo "scale=1; $LAST_SUCCESS_GB + 4.2" | bc)
         
         echo "CAPACIDADE REAL ESTIMADA: Aproximadamente ${REAL_CAPACITY_GB} GB"
         echo "========================================================="
