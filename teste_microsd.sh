@@ -1,14 +1,105 @@
 #!/bin/bash
 
-# --- Configurações ---
-# O ponto de montagem (mount point) do seu cartão MicroSD.
-TARGET_DIR="/run/media/luis/falso" 
+# --- Coleta de Parâmetros ---
+# Aceita parâmetros: ./script.sh [PONTO_DE_MONTAGEM] [TAMANHO_GB]
+# Se não fornecidos, pergunta ao usuário
 
-# Tamanho do arquivo de teste em GB. Use bc para cálculos decimais.
-DUMMY_FILE_SIZE_GB="2.2" 
-# Tamanho em MB para o dd (aproximado).
-DUMMY_FILE_SIZE_MB=$((2200)) 
-DUMMY_FILE_NAME="teste_bloco_4g.bin"
+# Função para validar se um número é válido (positivo e numérico)
+is_valid_number() {
+    local num="$1"
+    # Verifica se é um número positivo (permite decimais)
+    # Aceita formatos como: 1, 1.0, 0.5, 2.5, etc.
+    # Rejeita: 0, 0.0, valores negativos, strings vazias
+    if echo "$num" | grep -qE '^[0-9]+\.?[0-9]*$'; then
+        # Verifica se não é zero usando bc (se disponível) ou comparação simples
+        if command -v bc >/dev/null 2>&1; then
+            if [ "$(echo "$num > 0" | bc -l)" -eq 1 ]; then
+                return 0
+            fi
+        else
+            # Fallback: verifica se não é zero puro
+            if [ "$num" != "0" ] && [ "$num" != "0.0" ] && [ "$num" != "0.00" ]; then
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
+# Função para mostrar uso do script
+show_usage() {
+    echo "Uso: $0 [PONTO_DE_MONTAGEM] [TAMANHO_GB]"
+    echo ""
+    echo "Parâmetros:"
+    echo "  PONTO_DE_MONTAGEM  - Diretório onde o dispositivo está montado (ex: /run/media/usuario/sd32)"
+    echo "  TAMANHO_GB         - Tamanho do arquivo de teste em GB (ex: 1.0, 0.5, 2.0)"
+    echo ""
+    echo "Exemplos:"
+    echo "  $0 /run/media/usuario/sd32 1.0"
+    echo "  $0 /mnt/sdcard 0.5"
+    echo "  $0  (será solicitado interativamente)"
+}
+
+# Verifica se o usuário pediu ajuda
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    show_usage
+    exit 0
+fi
+
+# Coleta o ponto de montagem
+if [ -n "$1" ]; then
+    TARGET_DIR="$1"
+else
+    echo "📁 Informe o ponto de montagem do dispositivo MicroSD:"
+    echo "   (ex: /run/media/usuario/sd32 ou /mnt/sdcard)"
+    read -r TARGET_DIR
+fi
+
+# Remove barra final se houver
+TARGET_DIR="${TARGET_DIR%/}"
+
+# Valida o diretório
+if [ -z "$TARGET_DIR" ]; then
+    echo "❌ ERRO: Ponto de montagem não pode estar vazio."
+    exit 1
+fi
+
+# Coleta o tamanho do arquivo de teste
+if [ -n "$2" ]; then
+    DUMMY_FILE_SIZE_GB="$2"
+else
+    echo ""
+    echo "📏 Informe o tamanho do arquivo de teste em GB:"
+    echo "   (ex: 1.0, 0.5, 2.0 - valores decimais são aceitos)"
+    read -r DUMMY_FILE_SIZE_GB
+fi
+
+# Valida o tamanho
+if [ -z "$DUMMY_FILE_SIZE_GB" ]; then
+    echo "❌ ERRO: Tamanho do arquivo não pode estar vazio."
+    exit 1
+fi
+
+if ! is_valid_number "$DUMMY_FILE_SIZE_GB"; then
+    echo "❌ ERRO: Tamanho inválido. Deve ser um número positivo (ex: 1.0, 0.5, 2.0)"
+    exit 1
+fi
+
+# Calcula o tamanho em MB (arredondado para inteiro)
+# Converte GB para MB: 1 GB = 1000 MB
+if ! DUMMY_FILE_SIZE_MB=$(echo "scale=0; ($DUMMY_FILE_SIZE_GB * 1000) / 1" | bc 2>/dev/null); then
+    echo "❌ ERRO: Falha ao calcular tamanho. Verifique se 'bc' está instalado."
+    exit 1
+fi
+
+# Valida se o resultado é válido
+if [ -z "$DUMMY_FILE_SIZE_MB" ] || [ "$DUMMY_FILE_SIZE_MB" -le 0 ] 2>/dev/null; then
+    echo "❌ ERRO: Tamanho calculado inválido: ${DUMMY_FILE_SIZE_MB} MB"
+    exit 1
+fi
+
+# Gera o nome do arquivo baseado no tamanho
+DUMMY_FILE_NAME="teste_bloco_${DUMMY_FILE_SIZE_GB}g.bin"
 DUMMY_FILE_PATH="$TARGET_DIR/$DUMMY_FILE_NAME"
 TARGET_COPY_NAME_BASE="$TARGET_DIR/copia_"
 
@@ -17,11 +108,6 @@ COPY_COUNT=0
 
 # Hash do arquivo original (será calculado após a criação)
 ORIGINAL_FILE_HASH=""
-
-# Pontos de verificação em GB (checkpoints)
-FIRST_CHECKPOINT_GB=32  # Primeiro checkpoint em 32GB
-CHECKPOINT_INTERVAL_GB=16  # Intervalo de verificação após 32GB
-NEXT_CHECKPOINT_GB=$FIRST_CHECKPOINT_GB
 
 # --- Funções ---
 
@@ -112,7 +198,7 @@ elif dd --help 2>/dev/null | grep -q "status=progress"; then
 else
     # Fallback: dd simples sem progresso (mas mostra erros)
     echo "Aviso: Progresso não disponível. Aguarde..."
-    echo "Nota: Se o processo travar, pode ser um problema de I/O no dispositivo."
+    echo "Nota: Se o processo travar, pode ser um problema de I/O no dispositivo. Neste ponto pode ser que o CTRL+C não funcione, pois o comando dd utilizado para criar o arquivo de testes bloqueie o processo, mas é questão de esperar ele finalizar para o processo ser cancelado."
     if ! dd if=/dev/zero of="$DUMMY_FILE_PATH" bs=1M count=$DUMMY_FILE_SIZE_MB; then
         echo ""
         echo "❌ ERRO: Falha ao criar o arquivo de bloco. Verifique o ponto de montagem e permissões."
@@ -133,8 +219,8 @@ echo "✅ Arquivo de bloco criado. Hash: ${ORIGINAL_FILE_HASH:0:8}..."
 
 # 2. Loop de cópia
 echo ""
-echo "Iniciando loop de cópia com verificação progressiva..."
-echo "Primeiro checkpoint: ${FIRST_CHECKPOINT_GB}GB, depois a cada ${CHECKPOINT_INTERVAL_GB}GB"
+echo "Iniciando loop de cópia com verificação após cada escrita..."
+echo "A integridade de TODOS os arquivos será verificada após cada nova cópia."
 echo "Pressione Ctrl+C a qualquer momento para interromper."
 echo ""
 
@@ -152,104 +238,98 @@ while true; do
         
         echo "✅ Cópia $COPY_COUNT bem-sucedida."
         
-        # 2b. Remove a cópia anterior, MAS SEMPRE MANTÉM:
-        # - copia_1.bin (para verificação de integridade)
-        # - copia_2.bin (backup adicional)
-        # - copia atual e anterior (para ter pelo menos 2 cópias sempre)
-        if [ $COPY_COUNT -gt 3 ]; then
-            # Remove apenas cópias antigas, mantendo as 2 últimas e as 2 primeiras
-            rm -f "$TARGET_COPY_NAME_BASE$((COPY_COUNT - 2)).bin"
-        fi
+        # NOTA IMPORTANTE: NÃO removemos NENHUM arquivo durante o teste!
+        # Precisamos encher o disco completamente para:
+        # - Cartão REAL: cp falhará quando realmente encher
+        # - Cartão FALSO: continuará "copiando" mas sobrescreverá arquivos anteriores
         
-        # 2c. *** TESTE DE INTEGRIDADE NOS CHECKPOINTS ***
-        # Verifica integridade quando atingir os checkpoints progressivos
-        SHOULD_CHECK=0
+        # 2b. *** VERIFICAÇÃO DE INTEGRIDADE DE TODOS OS ARQUIVOS ***
+        # Aguarda processamento de I/O
+        safe_sync
         
-        # Verifica se atingimos ou passamos do próximo checkpoint
-        if echo "$WRITTEN_GB >= $NEXT_CHECKPOINT_GB" | bc -l | grep -q 1; then
-            SHOULD_CHECK=1
-        fi
+        echo "Verificando integridade de todos os arquivos copiados..."
         
-        if [ $SHOULD_CHECK -eq 1 ]; then
-            echo ""
-            echo "📊 CHECKPOINT ATINGIDO: ${WRITTEN_GB} GB escritos"
-            echo "Verificando integridade dos arquivos originais..."
-            safe_sync
+        # Verifica todos os arquivos anteriores (de 1 até COPY_COUNT-1)
+        # Se esta é a primeira cópia, não há nada para verificar ainda
+        if [ $COPY_COUNT -gt 1 ]; then
+            CORRUPTED_FILE=""
+            CORRUPTED_NUM=0
             
-            # Verifica se copia_1.bin ainda existe
-            if [ ! -f "$TARGET_COPY_NAME_BASE1.bin" ]; then
-                echo ""
-                echo "========================================================="
-                echo "🛑 ERRO CRÍTICO DE INTEGRIDADE DETECTADO!"
-                echo "O arquivo 'copia_1.bin' foi deletado/sobrescrito pelo dispositivo."
-                echo "Isso indica que a capacidade real foi atingida."
-                echo ""
+            for i in $(seq 1 $((COPY_COUNT - 1))); do
+                CHECK_FILE="${TARGET_COPY_NAME_BASE}${i}.bin"
                 
-                # A capacidade real é aproximadamente o total escrito
-                REAL_CAPACITY_GB=$(echo "scale=1; ($COPY_COUNT - 1) * $DUMMY_FILE_SIZE_GB" | bc)
+                # Verifica se o arquivo existe
+                if [ ! -f "$CHECK_FILE" ]; then
+                    CORRUPTED_FILE="copia_${i}.bin"
+                    CORRUPTED_NUM=$i
+                    echo ""
+                    echo "========================================================="
+                    echo "🛑 Capacidade real atingida!"
+                    echo "O arquivo '${CORRUPTED_FILE}' foi deletado/sobrescrito pelo dispositivo."
+                    echo "Isso indica que a capacidade real foi atingida."
+                    echo ""
+                    
+                    # A capacidade real é aproximadamente o total escrito menos o atual
+                    REAL_CAPACITY_GB=$(echo "scale=1; ($COPY_COUNT - 1) * $DUMMY_FILE_SIZE_GB" | bc)
+                    
+                    echo "CAPACIDADE REAL ESTIMADA: Aproximadamente ${REAL_CAPACITY_GB} GB"
+                    echo "CAPACIDADE REPORTADA: ${WRITTEN_GB} GB (ou mais)"
+                    echo "DIFERENÇA: Cartão falsificado detectado!"
+                    echo "========================================================="
+                    break
+                fi
                 
-                echo "CAPACIDADE REAL ESTIMADA: Aproximadamente ${REAL_CAPACITY_GB} GB"
-                echo "CAPACIDADE REPORTADA: ${NEXT_CHECKPOINT_GB}+ GB (ou mais)"
-                echo "DIFERENÇA: Cartão falsificado detectado!"
-                echo "========================================================="
+                # Calcula o hash e compara
+                FILE_HASH=$(md5sum "$CHECK_FILE" 2>/dev/null | cut -d' ' -f1)
+                
+                if [ -z "$FILE_HASH" ]; then
+                    CORRUPTED_FILE="copia_${i}.bin"
+                    CORRUPTED_NUM=$i
+                    echo ""
+                    echo "========================================================="
+                    echo "🛑 Capacidade real atingida!"
+                    echo "Não foi possível ler '${CORRUPTED_FILE}'."
+                    echo "O arquivo pode ter sido corrompido ou sobrescrito."
+                    echo ""
+                    
+                    REAL_CAPACITY_GB=$(echo "scale=1; ($COPY_COUNT - 1) * $DUMMY_FILE_SIZE_GB" | bc)
+                    
+                    echo "CAPACIDADE REAL ESTIMADA: Aproximadamente ${REAL_CAPACITY_GB} GB"
+                    echo "Cartão falsificado detectado!"
+                    echo "========================================================="
+                    break
+                fi
+                
+                if [ "$FILE_HASH" != "$ORIGINAL_FILE_HASH" ]; then
+                    CORRUPTED_FILE="copia_${i}.bin"
+                    CORRUPTED_NUM=$i
+                    echo ""
+                    echo "========================================================="
+                    echo "🛑 Capacidade real atingida!"
+                    echo "O arquivo '${CORRUPTED_FILE}' foi corrompido/sobrescrito."
+                    echo ""
+                    echo "Hash original: ${ORIGINAL_FILE_HASH:0:16}..."
+                    echo "Hash da cópia: ${FILE_HASH:0:16}..."
+                    echo ""
+                    
+                    REAL_CAPACITY_GB=$(echo "scale=1; ($COPY_COUNT - 1) * $DUMMY_FILE_SIZE_GB" | bc)
+                    
+                    echo "CAPACIDADE REAL ESTIMADA: Aproximadamente ${REAL_CAPACITY_GB} GB"
+                    echo "Cartão falsificado detectado!"
+                    echo "========================================================="
+                    break
+                fi
+            done
+            
+            # Se detectou corrupção, para o teste
+            if [ -n "$CORRUPTED_FILE" ]; then
                 break
             fi
             
-            # Aguarda para garantir que o arquivo está acessível
-            sleep 1
-            
-            # Calcula o hash da cópia #1 e compara com o hash original
-            echo "Calculando hash de 'copia_1.bin'..."
-            COPY1_HASH=$(md5sum "$TARGET_COPY_NAME_BASE1.bin" 2>/dev/null | cut -d' ' -f1)
-            
-            if [ -z "$COPY1_HASH" ]; then
-                echo ""
-                echo "========================================================="
-                echo "🛑 ERRO CRÍTICO DE INTEGRIDADE DETECTADO!"
-                echo "Não foi possível ler 'copia_1.bin'."
-                echo "O arquivo pode ter sido corrompido ou sobrescrito."
-                echo ""
-                
-                REAL_CAPACITY_GB=$(echo "scale=1; ($COPY_COUNT - 1) * $DUMMY_FILE_SIZE_GB" | bc)
-                
-                echo "CAPACIDADE REAL ESTIMADA: Aproximadamente ${REAL_CAPACITY_GB} GB"
-                echo "Cartão falsificado detectado!"
-                echo "========================================================="
-                break
-            fi
-            
-            if [ "$COPY1_HASH" != "$ORIGINAL_FILE_HASH" ]; then
-                echo ""
-                echo "========================================================="
-                echo "🛑 ERRO CRÍTICO DE INTEGRIDADE DETECTADO!"
-                echo "O arquivo 'copia_1.bin' foi corrompido/sobrescrito."
-                echo ""
-                echo "Hash original: ${ORIGINAL_FILE_HASH:0:16}..."
-                echo "Hash da cópia: ${COPY1_HASH:0:16}..."
-                echo ""
-                
-                REAL_CAPACITY_GB=$(echo "scale=1; ($COPY_COUNT - 1) * $DUMMY_FILE_SIZE_GB" | bc)
-                
-                echo "CAPACIDADE REAL ESTIMADA: Aproximadamente ${REAL_CAPACITY_GB} GB"
-                echo "Cartão falsificado detectado!"
-                echo "========================================================="
-                break
-            fi
-            
-            echo "✅ Integridade verificada. Arquivos originais estão OK (hash: ${COPY1_HASH:0:8}...)"
-            
-            # Atualiza o próximo checkpoint
-            if echo "$NEXT_CHECKPOINT_GB == $FIRST_CHECKPOINT_GB" | bc -l | grep -q 1; then
-                # Após o primeiro checkpoint, usa intervalos de 16GB
-                NEXT_CHECKPOINT_GB=$(echo "$NEXT_CHECKPOINT_GB + $CHECKPOINT_INTERVAL_GB" | bc)
-            else
-                NEXT_CHECKPOINT_GB=$(echo "$NEXT_CHECKPOINT_GB + $CHECKPOINT_INTERVAL_GB" | bc)
-            fi
-            
-            echo "Próximo checkpoint: ${NEXT_CHECKPOINT_GB} GB"
-            echo "Continuando..."
-            echo ""
+            echo "✅ Integridade verificada. Todos os $((COPY_COUNT - 1)) arquivos anteriores estão OK."
         fi
+        
+        echo ""
         
     else
         # Se o comando 'cp' falhar, o disco está cheio.
@@ -261,48 +341,65 @@ while true; do
         LAST_SUCCESS_GB=$(echo "scale=1; ($((COPY_COUNT - 1)) * $DUMMY_FILE_SIZE_GB)" | bc)
         
         echo ""
-        echo "Verificando integridade dos arquivos para determinar se o disco é real..."
+        echo "Verificando integridade de TODOS os arquivos para determinar se o disco é real..."
         safe_sync
         sleep 2
         
-        # Verifica se os primeiros arquivos ainda existem e estão íntegros
-        if [ ! -f "$TARGET_COPY_NAME_BASE1.bin" ]; then
-            echo ""
-            echo "========================================================="
-            echo "🛑 DISCO FALSIFICADO DETECTADO!"
-            echo "O arquivo 'copia_1.bin' foi sobrescrito/deletado."
-            echo ""
-            echo "CAPACIDADE REAL: Aproximadamente ${LAST_SUCCESS_GB} GB"
-            echo "Este é um cartão falsificado com capacidade menor que a reportada."
-            echo "========================================================="
-        else
-            # Verifica a integridade
-            COPY1_HASH=$(md5sum "$TARGET_COPY_NAME_BASE1.bin" 2>/dev/null | cut -d' ' -f1)
+        # Verifica todos os arquivos copiados
+        ALL_FILES_OK=1
+        CORRUPTED_FILE=""
+        
+        for i in $(seq 1 $((COPY_COUNT - 1))); do
+            CHECK_FILE="${TARGET_COPY_NAME_BASE}${i}.bin"
             
-            if [ -n "$COPY1_HASH" ] && [ "$COPY1_HASH" = "$ORIGINAL_FILE_HASH" ]; then
+            # Verifica se o arquivo existe
+            if [ ! -f "$CHECK_FILE" ]; then
+                ALL_FILES_OK=0
+                CORRUPTED_FILE="copia_${i}.bin"
                 echo ""
                 echo "========================================================="
-                echo "✅ DISCO REAL CONFIRMADO!"
-                echo "O disco está realmente cheio e os arquivos originais estão íntegros."
+                echo "🛑 Capacidade total atingida!"
+                echo "O arquivo '${CORRUPTED_FILE}' foi sobrescrito/deletado."
                 echo ""
                 echo "CAPACIDADE REAL: Aproximadamente ${LAST_SUCCESS_GB} GB"
-                echo "Este é um cartão genuíno. A capacidade está correta."
+                echo "Este é um cartão falsificado com capacidade menor que a reportada."
                 echo "========================================================="
-            else
+                break
+            fi
+            
+            # Verifica a integridade
+            FILE_HASH=$(md5sum "$CHECK_FILE" 2>/dev/null | cut -d' ' -f1)
+            
+            if [ -z "$FILE_HASH" ] || [ "$FILE_HASH" != "$ORIGINAL_FILE_HASH" ]; then
+                ALL_FILES_OK=0
+                CORRUPTED_FILE="copia_${i}.bin"
                 echo ""
                 echo "========================================================="
-                echo "🛑 DISCO FALSIFICADO DETECTADO!"
-                echo "O arquivo 'copia_1.bin' foi corrompido."
+                echo "🛑 Capacidade total atingida!"
+                echo "O arquivo '${CORRUPTED_FILE}' foi corrompido."
                 echo ""
-                if [ -n "$COPY1_HASH" ]; then
+                if [ -n "$FILE_HASH" ]; then
                     echo "Hash original: ${ORIGINAL_FILE_HASH:0:16}..."
-                    echo "Hash da cópia: ${COPY1_HASH:0:16}..."
+                    echo "Hash da cópia: ${FILE_HASH:0:16}..."
                 fi
                 echo ""
                 echo "CAPACIDADE REAL: Aproximadamente ${LAST_SUCCESS_GB} GB"
                 echo "Este é um cartão falsificado com capacidade menor que a reportada."
                 echo "========================================================="
+                break
             fi
+        done
+        
+        # Se todos os arquivos estão OK, é um disco real
+        if [ $ALL_FILES_OK -eq 1 ]; then
+            echo ""
+            echo "========================================================="
+            echo "✅ DISCO REAL CONFIRMADO!"
+            echo "O disco está realmente cheio e TODOS os $((COPY_COUNT - 1)) arquivos estão íntegros."
+            echo ""
+            echo "CAPACIDADE REAL: Aproximadamente ${LAST_SUCCESS_GB} GB"
+            echo "Este é um cartão genuíno. A capacidade está correta."
+            echo "========================================================="
         fi
         
         break
